@@ -72,9 +72,10 @@ uv sync --group dev
 uv run uvicorn api.main:app --factory --host 127.0.0.1 --port 8000
 ```
 
-Open http://127.0.0.1:8000/. http://127.0.0.1:8000/?demo=1 replays a recorded scan and
-needs no key. Live scans need `MODEL_API_KEY` in a `.env` file next to this README or in the
-environment:
+Open http://127.0.0.1:8000/. Repository scans run in free code-only mode by default and
+do not call the Meta API. http://127.0.0.1:8000/?demo=1 replays a recorded scan and
+needs no key. To opt into model-based classification, investigation, and ranking, set
+both `TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY` in the environment:
 
 ```
 MODEL_API_KEY=your-meta-model-api-key
@@ -126,27 +127,25 @@ and break the deploy.
 
 1. Push this repository to GitHub.
 2. In Vercel: **Add New → Project**, import the repository, keep the detected settings.
-3. Under **Environment Variables** add `MODEL_API_KEY` (and `GITHUB_TOKEN` if you have
-   one), then **Deploy**. Live scans stay paused by default on Vercel; add
-   `TRUSTMAP_ENABLE_LIVE_SCANS=1` only when you intend to let site visitors spend from
-   that key.
+3. Under **Environment Variables** add `GITHUB_TOKEN` if you have one, then **Deploy**.
+   Repository scans use free code-only mode by default. To let scans call the Meta API,
+   explicitly set both `TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY`.
 
 What changes on Vercel, all handled in code when the `VERCEL` variable is present:
 
 - The page starts and follows a scan in one request (`POST /api/scan/stream`), because
   the next request can reach a different instance. Share links are turned off there.
-- A request may run for five minutes on the free plan. Classify groups repeated
-  references, sends eight batches to Muse Spark at a time, and reports progress. It
-  stops starting model work after 105 seconds by default; unfinished groups get
-  explicit low-confidence fallback labels. Clean targets skip model ranking. The agent
-  stage stops starting new work 170 seconds into a scan
+- A request may run for five minutes on the free plan. In code-only mode, classify uses
+  file-context rules, investigation uses lookup evidence, and ranking uses code severity
+  rules; no Meta model calls are made. If model scans are explicitly enabled, classify
+  groups repeated references, sends eight batches concurrently, and stops after 105
+  seconds by default. The agent stage stops starting new work 170 seconds into a scan
   (`TRUSTMAP_AGENT_DEADLINE_S`) and ranking stops starting model calls at 250 seconds
   (`TRUSTMAP_RANK_DEADLINE_S`), so the scan ends before the cutoff; skipped targets keep
   their lookup facts and the code severity rules.
 - Only `/tmp` is writable, so the cache lives in `/tmp/trustmap.db` and starts empty on
   each new instance. The daily spend cap and per-IP limit live there too, so they count
-  per instance. Live scans are opt-in on Vercel because this is not a shared spending
-  ledger.
+  per instance. Code-only scans do not reserve or spend from the model budget.
 
 ### Render (the checked-in blueprint)
 
