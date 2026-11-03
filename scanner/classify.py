@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 
 from scanner.config import (
     CLASSIFY_BATCH_SIZE,
@@ -9,8 +12,8 @@ from scanner.config import (
     CLASSIFY_MODEL,
     CLASSIFY_REASONING_EFFORT,
 )
-from scanner.extract import actionable
-from scanner.llm import ModelClient, call_json, redact_secrets
+from scanner.extract import actionable, is_bucket_ref
+from scanner.llm import ModelClient, call_json, is_model_transport_error, redact_secrets
 from scanner.lookups import LookupCache
 from scanner.models import (
     Classification,
@@ -71,6 +74,27 @@ CLASSIFY_JSON_SCHEMA = {
     "required": ["items"],
     "additionalProperties": False,
 }
+CLASSIFICATION_FALLBACK_REASON = (
+    "Model unavailable; a file-context fallback label was used. Review this classification."
+)
+
+
+def _classification_key(ref: Reference) -> tuple[str, str, str, str, str, str]:
+    """Group repeated references that share a target and the same source context."""
+    suffix = PurePosixPath(urlsplit(ref.raw).path.lower()).suffix
+    return (
+        ref.host_or_bucket.casefold(),
+        ref.file.casefold(),
+        ref.tag.casefold(),
+        suffix,
+        ref.action_ref.casefold(),
+        (ref.filter_reason or "").casefold(),
+    )
+
+
+def classification_group_count(refs: list[Reference], *, include_filtered: bool = False) -> int:
+    chosen = refs if include_filtered else actionable(refs)
+    return len({_classification_key(ref) for ref in chosen})
 
 
 def classify(
@@ -80,32 +104,84 @@ def classify(
     include_filtered: bool = False,
     cache: LookupCache | None = None,
     logs: list[CallLog] | None = None,
+    on_progress=None,
+    deadline: float | None = None,
 ) -> list[Classification]:
     chosen = refs if include_filtered else actionable(refs)
+    groups: dict[tuple[str, str, str, str, str, str], list[Reference]] = {}
+    for ref in chosen:
+        groups.setdefault(_classification_key(ref), []).append(ref)
+    keys = list(groups)
+    representatives = [groups[key][0] for key in keys]
     batches = [
-        chosen[start : start + CLASSIFY_BATCH_SIZE]
-        for start in range(0, len(chosen), CLASSIFY_BATCH_SIZE)
+        representatives[start : start + CLASSIFY_BATCH_SIZE]
+        for start in range(0, len(representatives), CLASSIFY_BATCH_SIZE)
     ]
     # one log list per batch, merged in batch order, so costs never depend on timing
     batch_logs: list[list[CallLog]] = [[] for _ in batches]
 
     def run(index: int) -> list[Classification]:
-        return _classify_batch(
-            batches[index], client=client, cache=cache, logs=batch_logs[index]
-        )
+        return _classify_batch(batches[index], client=client, cache=cache, logs=batch_logs[index])
 
     workers = min(CLASSIFY_CONCURRENCY, len(batches))
+    done: list[list[Classification] | None] = [None] * len(batches)
+    classified_groups = 0
     if workers <= 1:
-        done = [run(index) for index in range(len(batches))]
+        for index in range(len(batches)):
+            if deadline is not None and time.monotonic() >= deadline:
+                done[index] = [
+                    _fallback_classification(ref, str(item_index))
+                    for item_index, ref in enumerate(batches[index])
+                ]
+            else:
+                done[index] = run(index)
+            classified_groups += len(batches[index])
+            if on_progress is not None:
+                on_progress(classified_groups, len(representatives))
     else:
-        # A big repository is dozens of batches; one at a time they took longer
-        # than a serverless request may run.
+        # Complete independent batches as they return, while preserving source
+        # order in the final report and in the progress events.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            done = list(pool.map(run, range(len(batches))))
+            futures = {pool.submit(run, index): index for index in range(len(batches))}
+            try:
+                timeout = (
+                    max(0.0, deadline - time.monotonic())
+                    if deadline is not None
+                    else None
+                )
+                for future in as_completed(futures, timeout=timeout):
+                    index = futures[future]
+                    done[index] = future.result()
+                    classified_groups += len(batches[index])
+                    if on_progress is not None:
+                        on_progress(classified_groups, len(representatives))
+            except TimeoutError:
+                for future, index in futures.items():
+                    if done[index] is None:
+                        future.cancel()
+                        done[index] = [
+                            _fallback_classification(ref, str(item_index))
+                            for item_index, ref in enumerate(batches[index])
+                        ]
+                        classified_groups += len(batches[index])
+                if on_progress is not None:
+                    on_progress(classified_groups, len(representatives))
     if logs is not None:
         for bundle in batch_logs:
             logs.extend(bundle)
-    return [item for batch in done for item in batch]
+    by_key = {
+        key: item
+        for key, item in zip(keys, (item for batch in done for item in (batch or [])), strict=True)
+    }
+    expanded: list[Classification] = []
+    for index, ref in enumerate(chosen):
+        item = by_key[_classification_key(ref)]
+        expanded.append(
+            item.model_copy(
+                update={"id": str(index), "file": ref.file, "line": ref.line, "host_or_bucket": ref.host_or_bucket}
+            )
+        )
+    return expanded
 
 
 def set_aside(ref: Reference) -> Classification:
@@ -158,18 +234,24 @@ def _classify_batch(
         if len(set(got)) != len(got):
             raise ValueError("duplicate ids")
 
-    parsed, log = call_json(
-        CLASSIFY_MODEL,
-        CLASSIFY_SYSTEM_PROMPT,
-        user,
-        ClassificationBatch,
-        CLASSIFY_REASONING_EFFORT,
-        client=client,
-        json_schema=CLASSIFY_JSON_SCHEMA,
-        schema_name="classification_batch",
-        cache=cache,
-        extra_check=check_ids,
-    )
+    try:
+        parsed, log = call_json(
+            CLASSIFY_MODEL,
+            CLASSIFY_SYSTEM_PROMPT,
+            user,
+            ClassificationBatch,
+            CLASSIFY_REASONING_EFFORT,
+            client=client,
+            json_schema=CLASSIFY_JSON_SCHEMA,
+            schema_name="classification_batch",
+            cache=cache,
+            extra_check=check_ids,
+            retries=0,
+        )
+    except Exception as exc:
+        if not is_model_transport_error(exc):
+            raise
+        return [_fallback_classification(ref, str(index)) for index, ref in enumerate(batch)]
     if logs is not None:
         logs.append(log)
     by_id = {item.id: item for item in parsed.items}
@@ -187,6 +269,36 @@ def _merge(ref: Reference, item: ClassificationItem) -> Classification:
         blast_radius=item.blast_radius,
         confidence=item.confidence,
         reason=item.reason,
+    )
+
+
+def _fallback_classification(ref: Reference, ref_id: str) -> Classification:
+    file = ref.file.lower().strip("/")
+    parts = set(file.split("/"))
+    if is_bucket_ref(ref):
+        kind, runs_in = "bucket", "server"
+    elif ref.action_ref or file.startswith(".github/workflows/"):
+        kind, runs_in = "script", "ci"
+    elif ref.tag == "script":
+        kind, runs_in = "script", "browser"
+    elif ref.tag in {"img", "link", "source"}:
+        kind, runs_in = "asset", "browser"
+    elif parts & {"test", "tests", "__tests__"} or file.startswith("test_"):
+        kind, runs_in = "other", "test"
+    elif file.startswith("docs/") or PurePosixPath(file).name.startswith("readme"):
+        kind, runs_in = "docs_link", "docs_only"
+    else:
+        kind, runs_in = "other", "server"
+    return Classification(
+        id=ref_id,
+        file=ref.file,
+        line=ref.line,
+        host_or_bucket=ref.host_or_bucket,
+        type=kind,
+        runs_in=runs_in,
+        blast_radius=0,
+        confidence=0.0,
+        reason=CLASSIFICATION_FALLBACK_REASON,
     )
 
 
