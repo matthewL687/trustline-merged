@@ -108,6 +108,7 @@
       turns: {},           // target -> [{ tool, args, result, alert }]
       order: [],
       calls: 0,
+      classifying: null,
       ranked: {},          // target -> finding
       done: null,
       report: null,
@@ -200,6 +201,10 @@
         finish(2, ts);
         begin(3, ts);
         mark(2, 3);
+        break;
+      case "classifying":
+        S.classifying = ev;
+        mark(2);
         break;
       case "precheck":
         finish(1, ts);
@@ -530,7 +535,11 @@
       if (S.fromReport) { return pending("Not part of the saved report."); }
       if (layer(2).state === "running") {
         var n = S.gather ? S.gather.actionable : 0;
-        return pending("Muse Spark is reading the code around " + (n ? fmt(n) + " " + plural(n, "reference") : "each reference") + "…");
+        if (S.classifying && S.classifying.total) {
+          return pending("Muse Spark classified " + fmt(S.classifying.completed) + " of " + fmt(S.classifying.total) + " grouped references…");
+        }
+        var targets = S.gather && S.gather.targets_total ? " across " + fmt(S.gather.targets_total) + " targets" : "";
+        return pending("Grouping repeated references before classification: " + (n ? fmt(n) + " references" : "references") + targets + "…");
       }
       return layer(2).state === "done" ? pending("No classification details were sent.") : null;
     }
@@ -1192,7 +1201,8 @@
     setBusy(false);
     history.replaceState(null, "", window.location.pathname);
     var retry = { label: "Retry", run: function () { startScan(raw); } };
-    if (status === 503) { showDialog("Live scans aren’t configured on this server.", "The server has no MODEL_API_KEY. Add it to the server’s environment, or watch the recorded demo.", DEMO_ACTION); }
+    if (status === 503 && detail.indexOf("paused") >= 0) { showDialog("Live scans are paused on this server.", "The recorded demo is available. The server will only use its model key when live scans are explicitly enabled.", DEMO_ACTION); }
+    else if (status === 503) { showDialog("Live scans aren’t configured on this server.", "Add MODEL_API_KEY to the server’s environment, or watch the recorded demo.", DEMO_ACTION); }
     else if (status === 429) { showDialog("Trustline is busy.", detail || "Too many scans right now.", DEMO_ACTION); }
     else if (status === 400) { showDialog("This target can’t be scanned.", detail); }
     else if (status === 0) { showDialog("Could not reach the Trustline server.", "Check that it is running, then try again.", retry); }
