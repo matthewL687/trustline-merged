@@ -44,7 +44,9 @@ Public-safety limits (demo routes are exempt):
 
 - Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each accepted scan
   reserves the per-scan cap (`SCAN_COST_CAP_USD`, default 1) against the day, then
-  reconciles to actual spend when the job ends.
+  reconciles to actual spend when the job ends. This ledger is reliable on a
+  long-lived server with shared SQLite storage; on Vercel's ephemeral instances it is
+  per instance, so it is not a global spending ceiling.
 - Per-IP cap (`TRUSTMAP_IP_SCANS_PER_HOUR`, default 20). Client `X-Forwarded-For` is
   ignored unless `TRUSTMAP_TRUSTED_PROXY_HOPS` is set (0 locally, 1 on Render).
 - Concurrent jobs (`TRUSTMAP_MAX_CONCURRENT_SCANS`, default 3) → 429
@@ -59,11 +61,17 @@ When the daily cap is hit:
 
 Unknown `scan_id` on later GETs → 404.
 
-If `MODEL_API_KEY` is not set (and no test client is injected):
+On serverless hosts, live scans are disabled unless `TRUSTMAP_ENABLE_LIVE_SCANS=1` is set.
+This fail-closed default keeps public traffic from spending the server's model budget.
+The recorded demo remains available without a key. If live scans are enabled,
+`MODEL_API_KEY` must also be set. Local development can continue to use a key without
+the serverless opt-in.
+
+If `MODEL_API_KEY` is not set (and no test client is injected, or live scans are paused):
 
 ```json
 503
-{"error": "Live scans aren't configured; try the demo"}
+{"error": "Live scans are paused on this server; try the demo"}
 ```
 
 No job is created. Demo routes do not need the key.
@@ -88,6 +96,11 @@ keep their lookup evidence, so ranking and the severity floors still see it.
 and 480 elsewhere): targets not ranked by then keep the code severity, with the risk
 text saying so. Set either to `0` to disable its deadline. Model API requests time out
 after 30 seconds.
+
+`TRUSTMAP_CLASSIFY_DEADLINE_S` bounds classification on serverless hosts (default 105).
+It groups repeated references, submits up to eight batches concurrently, and labels
+unfinished groups with low-confidence file-context fallbacks so later scan stages can
+proceed. Clean targets that have no code flags skip model ranking.
 
 ## `GET /api/scan/{id}/events`
 
