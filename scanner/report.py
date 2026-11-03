@@ -877,6 +877,14 @@ def rank(
             deadline=deadline,
         )
         results[index] = finding
+        if finding.needs_review and finding.risk == RANK_TIME_NOTE:
+            emit(
+                on_event,
+                {
+                    "type": "notice",
+                    "message": "The model timed out during ranking. Trustline kept the code-based severity and marked the result for review.",
+                },
+            )
         # Tell the page as each target is ranked, not after all of them.
         emit(on_event, {"type": "ranked", **finding_public(finding)})
 
