@@ -1128,7 +1128,11 @@ def _finding_from_rank(
         ranked_blast_radius=ranked_blast,
         blast_override_reason=override,
         risk=risk,
-        fix=choose_fix(evidence, model_fix, final, group["rows"]),
+        fix=(
+            "Review the evidence and confirm this resource is controlled before relying on it."
+            if code_only and final != "info"
+            else choose_fix(evidence, model_fix, final, group["rows"])
+        ),
         uncertain_about=uncertain,
         needs_review=needs_review,
         floor_applied=raised,
