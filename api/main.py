@@ -22,12 +22,21 @@ from api.demo import demo_gap_ms, demo_report, load_demo
 from api.jobs import Job, JobStore
 from api.limits import LimitsStore, client_ip
 from scanner.config import (
+    DEFAULT_AGENT_DEADLINE_S,
+    DEFAULT_RANK_DEADLINE_S,
+    SERVERLESS_CLASSIFY_DEADLINE_S,
     SCAN_COST_CAP_USD,
     SERVERLESS_AGENT_DEADLINE_S,
     SERVERLESS_RANK_DEADLINE_S,
     on_serverless,
 )
-from scanner.llm import LiveModelClient, ModelClient, failure_message, redact_secrets
+from scanner.llm import (
+    DisabledModelClient,
+    LiveModelClient,
+    ModelClient,
+    failure_message,
+    redact_secrets,
+)
 from scanner.lookups import LookupCache, default_cache
 from scanner.report import ScanOutcome, run_scan
 from scanner.ssrf import allow_local_scan
@@ -38,7 +47,8 @@ log = logging.getLogger("trustmap")
 # The page lives in public/, which Vercel serves from its CDN; elsewhere this app serves it.
 PUBLIC = Path(__file__).resolve().parents[1] / "public"
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
-LIVE_UNCONFIGURED = "Live scans aren't configured; try the demo"
+MODEL_UNCONFIGURED = "Model scans need MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1"
+LIVE_UNCONFIGURED = MODEL_UNCONFIGURED
 PATH_REFUSED = "Paste a GitHub repository or website URL"
 HEARTBEAT_S = 15.0
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -101,13 +111,25 @@ def _deadline(env: str, serverless_default: float, start: float) -> float | None
 def agent_deadline(start: float | None = None) -> float | None:
     """When the agent stage must stop starting new work, as a time.monotonic() value."""
     start = time.monotonic() if start is None else start
-    return _deadline("TRUSTMAP_AGENT_DEADLINE_S", SERVERLESS_AGENT_DEADLINE_S, start)
+    default = SERVERLESS_AGENT_DEADLINE_S if on_serverless() else DEFAULT_AGENT_DEADLINE_S
+    return _deadline("TRUSTMAP_AGENT_DEADLINE_S", default, start)
 
 
 def rank_deadline(start: float | None = None) -> float | None:
     """When rank must stop starting model calls, so the scan ends before the host cuts it off."""
     start = time.monotonic() if start is None else start
-    return _deadline("TRUSTMAP_RANK_DEADLINE_S", SERVERLESS_RANK_DEADLINE_S, start)
+    default = SERVERLESS_RANK_DEADLINE_S if on_serverless() else DEFAULT_RANK_DEADLINE_S
+    return _deadline("TRUSTMAP_RANK_DEADLINE_S", default, start)
+
+
+def classify_deadline(start: float | None = None) -> float | None:
+    """Bound model classification on serverless hosts before falling back by file context."""
+    start = time.monotonic() if start is None else start
+    if not on_serverless():
+        return None
+    return _deadline(
+        "TRUSTMAP_CLASSIFY_DEADLINE_S", SERVERLESS_CLASSIFY_DEADLINE_S, start
+    )
 
 
 def create_app(
@@ -180,10 +202,14 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    def model_scans_enabled() -> bool:
+        enabled = os.environ.get("TRUSTMAP_ENABLE_MODEL_SCANS", "").strip().lower()
+        return model_client is not None or enabled in {"1", "true", "yes"}
+
     def live_ready() -> bool:
-        if model_client is not None:
-            return True
-        return bool(os.environ.get("MODEL_API_KEY", "").strip())
+        return model_client is not None or not model_scans_enabled() or bool(
+            os.environ.get("MODEL_API_KEY", "").strip()
+        )
 
     def admit(body: ScanIn, request: Request) -> Job | JSONResponse:
         """Check the target and the limits, then start the scan as a background job."""
@@ -194,10 +220,11 @@ def create_app(
         if kind == "path" and not path_scan_allowed(target):
             return JSONResponse(status_code=400, content={"error": PATH_REFUSED, "kind": "path"})
         if not live_ready():
-            return JSONResponse(status_code=503, content={"error": LIVE_UNCONFIGURED})
+            return JSONResponse(status_code=503, content={"error": MODEL_UNCONFIGURED})
+        use_model = model_scans_enabled()
         ip = client_ip(request, hops=limit_store.trusted_hops)
         job = Job(kind=kind, target=target)
-        blocked = limit_store.admit(ip, job.scan_id, cost_cap)
+        blocked = limit_store.admit(ip, job.scan_id, cost_cap if use_model else 0.0)
         if blocked:
             return JSONResponse(status_code=429, content={"error": blocked})
         store.add(job)
@@ -206,7 +233,8 @@ def create_app(
                 "type": "started",
                 "kind": kind,
                 "target": target,
-                "cost_cap_usd": cost_cap,
+                "cost_cap_usd": cost_cap if use_model else 0.0,
+                "model_calls_enabled": use_model,
                 # on a serverless host the next request can land on another
                 # instance, which has never heard of this job
                 "shareable": not on_serverless(),
@@ -240,20 +268,26 @@ def create_app(
 
         actual = 0.0
         start = time.monotonic()
+        use_model = model_scans_enabled()
         deadlines = {
             name: value
-            for name, value in (("deadline", agent_deadline(start)), ("rank_deadline", rank_deadline(start)))
+            for name, value in (
+                ("deadline", agent_deadline(start)),
+                ("rank_deadline", rank_deadline(start)),
+                ("classify_deadline", classify_deadline(start)),
+            )
             if value is not None
         }
         try:
             lookup = cache or lookup_default
             outcome = await scan_runner(
                 job.target,
-                client=client(),
+                client=client() if use_model else DisabledModelClient(),
                 cache=lookup,
                 ctx=ctx or ToolContext(cache=lookup),
                 hydrate_only=False,
-                cost_cap=cost_cap,
+                cost_cap=cost_cap if use_model else 0.0,
+                model_enabled=use_model,
                 on_event=on_event,
                 **deadlines,
             )

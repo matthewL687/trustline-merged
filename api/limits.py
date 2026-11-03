@@ -158,7 +158,7 @@ class LimitsStore:
         reserve_usd = self.scan_reserve if reserve_usd is None else reserve_usd
         if self.inflight_count() >= self.max_concurrent:
             return BUSY_MSG
-        if self.spent_today() + reserve_usd > self.daily_cap:
+        if reserve_usd > 0 and self.spent_today() + reserve_usd > self.daily_cap:
             return DAILY_LIMIT_MSG
         if self.starts_last_hour(ip) >= self.ip_per_hour:
             return HOURLY_LIMIT_MSG
@@ -183,7 +183,7 @@ class LimitsStore:
                 (day,),
             ).fetchone()
             spent = float(committed[0] if committed else 0) + float(reserved[0])
-            if spent + reserve_usd > self.daily_cap:
+            if reserve_usd > 0 and spent + reserve_usd > self.daily_cap:
                 conn.execute("ROLLBACK")
                 return DAILY_LIMIT_MSG
             starts = conn.execute(

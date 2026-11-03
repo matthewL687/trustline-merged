@@ -18,12 +18,21 @@ behind it:
 |---|---|---|
 | 01 Gather | code: file walk or page fetch, patterns, filters | `scanner/extract.py`, `scanner/website.py` |
 | 02 Classify | Muse Spark: what each reference is, where it runs, blast radius 0–3 | `scanner/classify.py` |
-| 03 Investigate | code lookups (DNS, RDAP, bucket probes, GitHub, platform fingerprints, Tranco) and the live home page of every host worth ranking; a target with a red flag gets one Muse Spark agent run (at most 6 turns) that digs into its history and leads; a clean target gets its history (crt.sh, Wayback) from code | `scanner/agent.py`, `scanner/tools/` |
+| 03 Investigate | code lookups (DNS, RDAP, bucket probes, GitHub, platform fingerprints, Tranco) and the live home page of every host worth ranking; a target with a red flag can get one Muse Spark agent run (at most 3 turns), with a scan-wide limit of 12 agent targets; a clean target gets its history (crt.sh, Wayback) from code | `scanner/agent.py`, `scanner/tools/` |
 | 04 Reason | Muse Spark writes the risk; code checks every claim against the evidence and applies severity floors. Only a code rule can put a target in Fix today | `scanner/report.py` |
 | 05 Report | code: fix today, review, checked and safe | `public/static/app.js` |
 
 Facts come from deterministic tools and are cached in SQLite. The model never looks
 anything up and never does date math.
+
+To bound slow model work, one scan starts at most 12 agent investigations, with at
+most 3 turns each. On long-lived hosts, new agent work stops 4 minutes after scan
+start and new ranking calls stop after 8 minutes; Vercel keeps its shorter 170/250
+second limits. Model requests time out after 30 seconds. Code lookups keep running
+for every selected target, and the report retains their evidence when a model step
+is skipped. Large repositories are still subject to the file and byte coverage caps
+reported by Layer 01, and external service delays mean no fixed runtime can be
+guaranteed for every repository.
 
 Scanning the same repo twice puts the same targets in Fix today. A target lands there
 only when a code rule says so (a missing bucket or account, an unregistered or dead
@@ -63,9 +72,10 @@ uv sync --group dev
 uv run uvicorn api.main:app --factory --host 127.0.0.1 --port 8000
 ```
 
-Open http://127.0.0.1:8000/. http://127.0.0.1:8000/?demo=1 replays a recorded scan and
-needs no key. Live scans need `MODEL_API_KEY` in a `.env` file next to this README or in the
-environment:
+Open http://127.0.0.1:8000/. Repository scans run in free code-only mode by default and
+do not call the Meta API. http://127.0.0.1:8000/?demo=1 replays a recorded scan and
+needs no key. To opt into model-based classification, investigation, and ranking, set
+both `TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY` in the environment:
 
 ```
 MODEL_API_KEY=your-meta-model-api-key
@@ -117,21 +127,25 @@ and break the deploy.
 
 1. Push this repository to GitHub.
 2. In Vercel: **Add New → Project**, import the repository, keep the detected settings.
-3. Under **Environment Variables** add `MODEL_API_KEY` (and `GITHUB_TOKEN` if you have
-   one), then **Deploy**.
+3. Under **Environment Variables** add `GITHUB_TOKEN` if you have one, then **Deploy**.
+   Repository scans use free code-only mode by default. To let scans call the Meta API,
+   explicitly set both `TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY`.
 
 What changes on Vercel, all handled in code when the `VERCEL` variable is present:
 
 - The page starts and follows a scan in one request (`POST /api/scan/stream`), because
   the next request can reach a different instance. Share links are turned off there.
-- A request may run for five minutes on the free plan. Classify sends eight batches to
-  Muse Spark at a time. The agent stage stops starting new work 170 seconds into a scan
+- A request may run for five minutes on the free plan. In code-only mode, classify uses
+  file-context rules, investigation uses lookup evidence, and ranking uses code severity
+  rules; no Meta model calls are made. If model scans are explicitly enabled, classify
+  groups repeated references, sends eight batches concurrently, and stops after 105
+  seconds by default. The agent stage stops starting new work 170 seconds into a scan
   (`TRUSTMAP_AGENT_DEADLINE_S`) and ranking stops starting model calls at 250 seconds
   (`TRUSTMAP_RANK_DEADLINE_S`), so the scan ends before the cutoff; skipped targets keep
   their lookup facts and the code severity rules.
 - Only `/tmp` is writable, so the cache lives in `/tmp/trustmap.db` and starts empty on
   each new instance. The daily spend cap and per-IP limit live there too, so they count
-  per instance; the per-scan cost cap still applies to every scan.
+  per instance. Code-only scans do not reserve or spend from the model budget.
 
 ### Render (the checked-in blueprint)
 

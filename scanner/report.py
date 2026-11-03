@@ -7,8 +7,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from scanner.agent import EXECUTING, investigate, should_investigate, tranco_checked_safe
-from scanner.classify import classify, set_aside
+from scanner.agent import (
+    EXECUTING,
+    FACTS_NOTE,
+    investigate,
+    should_investigate,
+    tranco_checked_safe,
+)
+from scanner.classify import classification_group_count, classify, set_aside
 from dataclasses import dataclass, field
 
 from scanner.config import (
@@ -45,7 +51,7 @@ from scanner.extract import (
 )
 from scanner.tranco import tranco_rank
 from scanner.website import extract_website
-from scanner.llm import CallLog, ModelClient, call_json
+from scanner.llm import CallLog, ModelClient, call_json, is_model_transport_error
 from scanner.lookups import LookupCache, consistent_evidence, merge_evidence
 from scanner.models import (
     Classification,
@@ -859,6 +865,7 @@ def rank(
     logs: list[CallLog] | None = None,
     on_event: OnEvent | None = None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> list[Finding]:
     groups = group_by_target(rows)
     if not groups:
@@ -875,8 +882,17 @@ def rank(
             cache=cache,
             logs=group_logs[index],
             deadline=deadline,
+            model_enabled=model_enabled,
         )
         results[index] = finding
+        if finding.needs_review and finding.risk == RANK_TIME_NOTE:
+            emit(
+                on_event,
+                {
+                    "type": "notice",
+                    "message": "The model timed out during ranking. Trustline kept the code-based severity and marked the result for review.",
+                },
+            )
         # Tell the page as each target is ranked, not after all of them.
         emit(on_event, {"type": "ranked", **finding_public(finding)})
 
@@ -900,10 +916,48 @@ def _rank_group(
     cache: LookupCache | None,
     logs: list[CallLog] | None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> Finding:
     payload = finding_payload(group)
     floor, floor_why = floor_decision(group)
     ref0 = group["rows"][0][0]
+    investigations = [row[2] for row in group["rows"]]
+    if not model_enabled:
+        parsed = RankModelOut(
+            severity="info",
+            risk="Free scan mode: no Meta model analysis was run. Severity uses code rules only.",
+            fix="remove dead reference",
+            uncertain_about="Model based classification and ranking are disabled.",
+            blast_radius=payload["classified_blast_radius"],
+            blast_override_reason="",
+        )
+        return _finding_from_rank(
+            group=group,
+            payload=payload,
+            parsed=parsed,
+            floor=floor,
+            floor_why=floor_why,
+            cost_total=0.0,
+            needs_review=True,
+            code_only=True,
+        )
+    if floor is None and all(item.summary == FACTS_NOTE for item in investigations):
+        parsed = RankModelOut(
+            severity="info",
+            risk="No code-based risk was found in the available evidence.",
+            fix="No action needed",
+            uncertain_about="",
+            blast_radius=payload["classified_blast_radius"],
+            blast_override_reason="",
+        )
+        return _finding_from_rank(
+            group=group,
+            payload=payload,
+            parsed=parsed,
+            floor=floor,
+            floor_why=floor_why,
+            cost_total=0.0,
+        )
     if tranco_checked_safe(ref0, group["evidence"]) and floor is None:
         rank = group["evidence"].get("tranco_rank")
         parsed = RankModelOut(
@@ -977,7 +1031,20 @@ def _rank_group(
                 floor_why=floor_why,
                 cost_total=cost_total,
             )
-        except ValueError as exc:
+        except Exception as exc:
+            if is_model_transport_error(exc):
+                return _finding_from_rank(
+                    group=group,
+                    payload=payload,
+                    parsed=None,
+                    floor=floor,
+                    floor_why=floor_why,
+                    cost_total=cost_total,
+                    needs_review=True,
+                    risk=RANK_TIME_NOTE,
+                )
+            if not isinstance(exc, ValueError):
+                raise
             rejected = str(exc)
             user = (
                 "Rank this target. Cite only facts from the provided evidence and finding.\n"
@@ -1009,6 +1076,7 @@ def _finding_from_rank(
     cost_total: float,
     needs_review: bool = False,
     risk: str = "",
+    code_only: bool = False,
 ) -> Finding:
     evidence = group["evidence"]
     refs = [item["file_line"] for item in payload["references"]]
@@ -1033,7 +1101,12 @@ def _finding_from_rank(
         model_fix = parsed.fix
         uncertain = parsed.uncertain_about
     uncertain = _github_owner_note(uncertain, evidence)
-    final, raised, ceiling_note = settle_severity(model_severity, floor)
+    if code_only:
+        final = floor or "info"
+        raised = floor or ""
+        ceiling_note = "Code rules only; no model ranking was used."
+    else:
+        final, raised, ceiling_note = settle_severity(model_severity, floor)
     # The rule that decided or bounded the severity, shown whether or not it
     # had to raise the model's call.
     floor_reason = floor_why if floor else ""
@@ -1055,7 +1128,11 @@ def _finding_from_rank(
         ranked_blast_radius=ranked_blast,
         blast_override_reason=override,
         risk=risk,
-        fix=choose_fix(evidence, model_fix, final, group["rows"]),
+        fix=(
+            "Review the evidence and confirm this resource is controlled before relying on it."
+            if code_only and final != "info"
+            else choose_fix(evidence, model_fix, final, group["rows"])
+        ),
         uncertain_about=uncertain,
         needs_review=needs_review,
         floor_applied=raised,
@@ -1102,6 +1179,8 @@ async def run_scan(
     allow_partial_cache: bool = False,
     cost_cap: float = SCAN_COST_CAP_USD,
     on_event: OnEvent | None = None,
+    classify_deadline: float | None = None,
+    model_enabled: bool = True,
     deadline: float | None = None,
     rank_deadline: float | None = None,
 ) -> ScanOutcome:
@@ -1129,14 +1208,47 @@ async def run_scan(
     class_logs: list[CallLog] = []
     # References code filters set aside never reach a later step, so the model
     # does not label them.
+    emit(
+        on_event,
+        {
+            "type": "classifying",
+            "completed": 0,
+            "total": classification_group_count(refs),
+        },
+    )
+
+    def classify_progress(completed: int, total: int) -> None:
+        emit(on_event, {"type": "classifying", "completed": completed, "total": total})
+
     labels = iter(
         await asyncio.to_thread(
-            classify, refs, client=client, include_filtered=False, cache=cache, logs=class_logs
+            classify,
+            refs,
+            client=client,
+            include_filtered=False,
+            cache=cache,
+            logs=class_logs,
+            on_progress=classify_progress,
+            deadline=classify_deadline,
+            model_enabled=model_enabled,
         )
     )
     classified = [
         next(labels) if ref.filter_reason is None else set_aside(ref) for ref in refs
     ]
+    fallback_count = sum(
+        item.reason.startswith("Model unavailable;")
+        for ref, item in zip(refs, classified, strict=True)
+        if ref.filter_reason is None
+    )
+    if fallback_count:
+        emit(
+            on_event,
+            {
+                "type": "notice",
+                "message": f"The model timed out during classification for {fallback_count} references. Trustline used file-context labels for those references; review them in the results.",
+            },
+        )
     pairs = list(zip(refs, classified, strict=True))
     if is_website_source(source):
         pairs = apply_website_roles(pairs)
@@ -1158,6 +1270,7 @@ async def run_scan(
             cost_cap=cost_cap,
             on_event=on_event,
             deadline=deadline,
+            model_enabled=model_enabled,
         )
         inv_by_loc = {(item.file, item.line): item for item in investigations}
         rows = [
@@ -1174,6 +1287,7 @@ async def run_scan(
         logs=rank_logs,
         on_event=on_event,
         deadline=rank_deadline,
+        model_enabled=model_enabled,
     )
     budget = sorted(
         {

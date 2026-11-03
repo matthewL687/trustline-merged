@@ -42,10 +42,12 @@ POST /api/scan
 
 Public-safety limits (demo routes are exempt):
 
-- Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each accepted scan
+- Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each model-enabled scan
   reserves the per-scan cap (`SCAN_COST_CAP_USD`, default 1) against the day, then
-  reconciles to actual spend when the job ends.
-- Per-IP cap (`TRUSTMAP_IP_SCANS_PER_HOUR`, default 5). Client `X-Forwarded-For` is
+  reconciles to actual spend when the job ends. This ledger is reliable on a
+  long-lived server with shared SQLite storage; on Vercel's ephemeral instances it is
+  per instance, so it is not a global spending ceiling.
+- Per-IP cap (`TRUSTMAP_IP_SCANS_PER_HOUR`, default 20). Client `X-Forwarded-For` is
   ignored unless `TRUSTMAP_TRUSTED_PROXY_HOPS` is set (0 locally, 1 on Render).
 - Concurrent jobs (`TRUSTMAP_MAX_CONCURRENT_SCANS`, default 3) → 429
   `"Busy, try again in a minute"`.
@@ -59,14 +61,25 @@ When the daily cap is hit:
 
 Unknown `scan_id` on later GETs → 404.
 
-If `MODEL_API_KEY` is not set (and no test client is injected):
+Repository scans use free code-only mode by default. Classification uses file-context
+rules, investigations use lookup evidence, and ranking uses code severity rules; no
+Meta API calls are made, the scan reports `$0.00` model cost, and no model-spend reserve
+is taken. The recorded demo also uses no key.
+
+To opt into model-based classification, investigation, and ranking, set
+`TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY`. Model scans then use the configured
+per-scan and daily limits. On Vercel, the SQLite spend ledger is per instance, so those
+limits are not a global spending ceiling. The model opt-in is the only scan path that
+can make requests to the Meta API.
+
+If `TRUSTMAP_ENABLE_MODEL_SCANS=1` but `MODEL_API_KEY` is not set:
 
 ```json
 503
-{"error": "Live scans aren't configured; try the demo"}
+{"error": "Model scans need MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1"}
 ```
 
-No job is created. Demo routes do not need the key.
+No job is created. Free code-only scans and demo routes do not need the key.
 
 ## `POST /api/scan/stream`
 
@@ -82,10 +95,17 @@ because another instance cannot replay the job.
 Every event stream sends an SSE comment (`: keep-alive`) after 15 quiet seconds.
 
 `TRUSTMAP_AGENT_DEADLINE_S` sets how many seconds into a scan the agent stage stops
-starting new work (default 170 on serverless hosts, off elsewhere). Targets it skips keep
-their lookup evidence, so ranking and the severity floors still see it.
-`TRUSTMAP_RANK_DEADLINE_S` does the same for ranking (default 250 on serverless hosts):
-targets not ranked by then keep the code severity, with the risk text saying so.
+starting new work (default 170 on serverless hosts and 240 elsewhere). Targets it skips
+keep their lookup evidence, so ranking and the severity floors still see it.
+`TRUSTMAP_RANK_DEADLINE_S` does the same for ranking (default 250 on serverless hosts
+and 480 elsewhere): targets not ranked by then keep the code severity, with the risk
+text saying so. Set either to `0` to disable its deadline. Model API requests time out
+after 30 seconds.
+
+`TRUSTMAP_CLASSIFY_DEADLINE_S` bounds classification on serverless hosts (default 105).
+It groups repeated references, submits up to eight batches concurrently, and labels
+unfinished groups with low-confidence file-context fallbacks so later scan stages can
+proceed. Clean targets that have no code flags skip model ranking.
 
 ## `GET /api/scan/{id}/events`
 

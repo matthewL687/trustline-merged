@@ -23,6 +23,6 @@ services:
       - key: TRUSTMAP_DAILY_CAP_USD
         value: "10"
       - key: TRUSTMAP_IP_SCANS_PER_HOUR
-        value: "5"
+        value: "20"
       - key: TRUSTMAP_CACHE_DB
         value: /var/data/trustmap.db

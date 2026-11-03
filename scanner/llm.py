@@ -15,6 +15,7 @@ from scanner.config import (
     CLASSIFY_MODEL,
     LLM_MAX_RETRIES,
     META_BASE_URL,
+    MODEL_REQUEST_TIMEOUT_S,
     MODEL_PRICES,
 )
 from scanner.lookups import LookupCache, default_cache
@@ -144,6 +145,16 @@ class FakeModelClient:
         )
 
 
+class DisabledModelClient:
+    """Sentinel used by free scans; every model stage must skip this client."""
+
+    def complete_json(self, **_kwargs: Any) -> RawCompletion:
+        raise RuntimeError("Meta API calls are disabled for this scan")
+
+    def complete_turn(self, **_kwargs: Any) -> ToolTurn:
+        raise RuntimeError("Meta API calls are disabled for this scan")
+
+
 def _tls_context() -> ssl.SSLContext:
     """The host's CA certificates plus certifi's bundle.
 
@@ -188,6 +199,17 @@ def failure_message(exc: BaseException) -> str:
     return text if len(text) <= FAILURE_LIMIT else text[:FAILURE_LIMIT] + "..."
 
 
+def is_model_transport_error(exc: BaseException) -> bool:
+    """Whether a model request failed before returning a usable response."""
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        from openai import APIConnectionError
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, APIConnectionError)
+
+
 class LiveModelClient:
     def __init__(self, api_key: str | None = None):
         from openai import DefaultHttpxClient, OpenAI
@@ -199,7 +221,10 @@ class LiveModelClient:
         self._client = OpenAI(
             base_url=META_BASE_URL,
             api_key=key,
-            http_client=DefaultHttpxClient(verify=_tls_context()),
+            timeout=MODEL_REQUEST_TIMEOUT_S,
+            http_client=DefaultHttpxClient(
+                verify=_tls_context(), timeout=MODEL_REQUEST_TIMEOUT_S
+            ),
         )
         self._steady = dict(STEADY_PARAMS)
 

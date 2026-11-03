@@ -108,6 +108,7 @@
       turns: {},           // target -> [{ tool, args, result, alert }]
       order: [],
       calls: 0,
+      classifying: null,
       ranked: {},          // target -> finding
       done: null,
       report: null,
@@ -182,6 +183,9 @@
         S.kind = ev.kind || S.kind;
         S.target = ev.target || S.target;
         S.recordedWith = ev.recorded_with || S.recordedWith;
+        if (ev.model_calls_enabled === false) {
+          S.notices.push("Free scan mode: no Meta API calls will be made.");
+        }
         S.startedTs = ts;
         begin(1, ts);
         mark(1);
@@ -200,6 +204,10 @@
         finish(2, ts);
         begin(3, ts);
         mark(2, 3);
+        break;
+      case "classifying":
+        S.classifying = ev;
+        mark(2);
         break;
       case "precheck":
         finish(1, ts);
@@ -246,6 +254,10 @@
         S.done = ev;
         S.doneTs = ts;
         S.finished = true;
+        mark();
+        break;
+      case "notice":
+        if (ev.message) { S.notices.push(String(ev.message)); }
         mark();
         break;
       case "error":
@@ -526,7 +538,11 @@
       if (S.fromReport) { return pending("Not part of the saved report."); }
       if (layer(2).state === "running") {
         var n = S.gather ? S.gather.actionable : 0;
-        return pending("Muse Spark is reading the code around " + (n ? fmt(n) + " " + plural(n, "reference") : "each reference") + "…");
+        if (S.classifying && S.classifying.total) {
+          return pending("Muse Spark classified " + fmt(S.classifying.completed) + " of " + fmt(S.classifying.total) + " grouped references…");
+        }
+        var targets = S.gather && S.gather.targets_total ? " across " + fmt(S.gather.targets_total) + " targets" : "";
+        return pending("Grouping repeated references before classification: " + (n ? fmt(n) + " references" : "references") + targets + "…");
       }
       return layer(2).state === "done" ? pending("No classification details were sent.") : null;
     }
@@ -578,7 +594,7 @@
 
   function stepNote(key, pre, turns) {
     var budget = (S.done && S.done.budget_targets) || [];
-    if (budget.indexOf(key) !== -1) { return "Not investigated: the scan’s model budget ran out."; }
+    if (budget.indexOf(key) !== -1) { return "Agent skipped: the scan reached its agent budget; code lookup facts were kept."; }
     if (pre.next === "popular") { return "No agent needed: a top-ranked domain that resolves."; }
     if (pre.next === "facts") {
       // say only what code actually ran for this target
@@ -629,15 +645,16 @@
       return state === "done" ? h("p", { class: "mono", text: "Nothing to look up." }) : null;
     }
     var agent = keys.filter(function (key) {
-      return (S.pre[key] || {}).next === "agent" || (S.turns[key] || []).length;
+      var budget = (S.done && S.done.budget_targets) || [];
+      return budget.indexOf(key) === -1 && ((S.pre[key] || {}).next === "agent" || (S.turns[key] || []).length);
     }).length;
     var flagged = keys.filter(function (key) {
       return facts(evidenceFor(key)).some(function (item) { return item[0] === "alert"; });
     }).length;
     return h("div", { class: "stats" },
       stat(fmt(keys.length), plural(keys.length, "target") + " checked"),
-      stat(fmt(agent), "sent to the agent"),
-      stat(fmt(S.calls), "agent " + plural(S.calls, "call")),
+      stat(fmt(agent), "agent candidates"),
+      stat(fmt(S.calls), "agent tool " + plural(S.calls, "call")),
       stat(fmt(flagged), "with a red flag"));
   }
 
@@ -763,7 +780,7 @@
     var list = findingsSorted();
     var groups = groupsOf(list);
     var budget = (S.done && S.done.budget_targets) || [];
-    var note = budget.length ? budget.length + " lower-priority " + plural(budget.length, "target was", "targets were") + " not investigated (model budget)." : "";
+    var note = budget.length ? budget.length + " lower-priority " + plural(budget.length, "target was", "targets were") + " not sent to the agent; code checks still ran." : "";
     if (!list.length && S.gather && !S.gather.actionable) { note = "Nothing in this target could change hands."; }
     return [
       note ? h("p", { class: "verdict-src mono", text: note }) : null,
@@ -847,7 +864,7 @@
     }
     if (n === 3) {
       var checked = Object.keys(S.pre).length || Object.keys(S.ranked).length;
-      return fmt(checked) + " checked" + (S.calls ? " · " + S.calls + " agent " + plural(S.calls, "call") : "");
+      return fmt(checked) + " checked" + (S.calls ? " · " + S.calls + " agent tool " + plural(S.calls, "call") : "");
     }
     if (n === 4) { return fmt(Object.keys(S.ranked).length) + " ranked"; }
     return groupsOf(findingsSorted()).today.length + " to fix today";
@@ -907,7 +924,7 @@
       parts.push("scanning " + clock(Date.now() - S.clientStart));
     } else if (S.mode !== "demo") {
       if (S.startedTs != null && S.doneTs != null) { parts.push(secs(S.doneTs - S.startedTs)); }
-      if (S.calls) { parts.push(S.calls + " agent " + plural(S.calls, "call")); }
+      if (S.calls) { parts.push(S.calls + " agent tool " + plural(S.calls, "call")); }
       var cost = S.done && typeof S.done.cost_usd === "number" ? S.done.cost_usd : null;
       if (cost != null) { parts.push(money(cost) + " model cost"); }
     }
@@ -1187,7 +1204,7 @@
     setBusy(false);
     history.replaceState(null, "", window.location.pathname);
     var retry = { label: "Retry", run: function () { startScan(raw); } };
-    if (status === 503) { showDialog("Live scans aren’t configured on this server.", "The server has no MODEL_API_KEY. Add it to the server’s environment, or watch the recorded demo.", DEMO_ACTION); }
+    if (status === 503) { showDialog("Model scans aren’t configured on this server.", "Repository scans can run in free code-only mode. Model analysis requires MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1.", DEMO_ACTION); }
     else if (status === 429) { showDialog("Trustline is busy.", detail || "Too many scans right now.", DEMO_ACTION); }
     else if (status === 400) { showDialog("This target can’t be scanned.", detail); }
     else if (status === 0) { showDialog("Could not reach the Trustline server.", "Check that it is running, then try again.", retry); }
