@@ -81,6 +81,7 @@ def test_home_page_and_demo_replay():
 def test_live_scan_without_key_returns_503(monkeypatch):
     monkeypatch.setattr("api.main._load_local_env", lambda: None)
     monkeypatch.delenv("MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("TRUSTMAP_ENABLE_MODEL_SCANS", "1")
     app = create_app()
     with TestClient(app) as client:
         response = client.post("/api/scan", json={"target": "https://example.com"})
