@@ -7,8 +7,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from scanner.agent import EXECUTING, investigate, should_investigate, tranco_checked_safe
-from scanner.classify import classify, set_aside
+from scanner.agent import (
+    EXECUTING,
+    FACTS_NOTE,
+    investigate,
+    should_investigate,
+    tranco_checked_safe,
+)
+from scanner.classify import classification_group_count, classify, set_aside
 from dataclasses import dataclass, field
 
 from scanner.config import (
@@ -912,6 +918,24 @@ def _rank_group(
     payload = finding_payload(group)
     floor, floor_why = floor_decision(group)
     ref0 = group["rows"][0][0]
+    investigations = [row[2] for row in group["rows"]]
+    if floor is None and all(item.summary == FACTS_NOTE for item in investigations):
+        parsed = RankModelOut(
+            severity="info",
+            risk="No code-based risk was found in the available evidence.",
+            fix="No action needed",
+            uncertain_about="",
+            blast_radius=payload["classified_blast_radius"],
+            blast_override_reason="",
+        )
+        return _finding_from_rank(
+            group=group,
+            payload=payload,
+            parsed=parsed,
+            floor=floor,
+            floor_why=floor_why,
+            cost_total=0.0,
+        )
     if tranco_checked_safe(ref0, group["evidence"]) and floor is None:
         rank = group["evidence"].get("tranco_rank")
         parsed = RankModelOut(
@@ -1123,6 +1147,7 @@ async def run_scan(
     allow_partial_cache: bool = False,
     cost_cap: float = SCAN_COST_CAP_USD,
     on_event: OnEvent | None = None,
+    classify_deadline: float | None = None,
     deadline: float | None = None,
     rank_deadline: float | None = None,
 ) -> ScanOutcome:
@@ -1150,14 +1175,46 @@ async def run_scan(
     class_logs: list[CallLog] = []
     # References code filters set aside never reach a later step, so the model
     # does not label them.
+    emit(
+        on_event,
+        {
+            "type": "classifying",
+            "completed": 0,
+            "total": classification_group_count(refs),
+        },
+    )
+
+    def classify_progress(completed: int, total: int) -> None:
+        emit(on_event, {"type": "classifying", "completed": completed, "total": total})
+
     labels = iter(
         await asyncio.to_thread(
-            classify, refs, client=client, include_filtered=False, cache=cache, logs=class_logs
+            classify,
+            refs,
+            client=client,
+            include_filtered=False,
+            cache=cache,
+            logs=class_logs,
+            on_progress=classify_progress,
+            deadline=classify_deadline,
         )
     )
     classified = [
         next(labels) if ref.filter_reason is None else set_aside(ref) for ref in refs
     ]
+    fallback_count = sum(
+        item.reason.startswith("Model unavailable;")
+        for ref, item in zip(refs, classified, strict=True)
+        if ref.filter_reason is None
+    )
+    if fallback_count:
+        emit(
+            on_event,
+            {
+                "type": "notice",
+                "message": f"The model timed out during classification for {fallback_count} references. Trustline used file-context labels for those references; review them in the results.",
+            },
+        )
     pairs = list(zip(refs, classified, strict=True))
     if is_website_source(source):
         pairs = apply_website_roles(pairs)
