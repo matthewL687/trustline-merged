@@ -42,7 +42,7 @@ POST /api/scan
 
 Public-safety limits (demo routes are exempt):
 
-- Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each accepted scan
+- Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each model-enabled scan
   reserves the per-scan cap (`SCAN_COST_CAP_USD`, default 1) against the day, then
   reconciles to actual spend when the job ends. This ledger is reliable on a
   long-lived server with shared SQLite storage; on Vercel's ephemeral instances it is
@@ -61,20 +61,25 @@ When the daily cap is hit:
 
 Unknown `scan_id` on later GETs → 404.
 
-On serverless hosts, live scans are disabled unless `TRUSTMAP_ENABLE_LIVE_SCANS=1` is set.
-This fail-closed default keeps public traffic from spending the server's model budget.
-The recorded demo remains available without a key. If live scans are enabled,
-`MODEL_API_KEY` must also be set. Local development can continue to use a key without
-the serverless opt-in.
+Repository scans use free code-only mode by default. Classification uses file-context
+rules, investigations use lookup evidence, and ranking uses code severity rules; no
+Meta API calls are made, the scan reports `$0.00` model cost, and no model-spend reserve
+is taken. The recorded demo also uses no key.
 
-If `MODEL_API_KEY` is not set (and no test client is injected, or live scans are paused):
+To opt into model-based classification, investigation, and ranking, set
+`TRUSTMAP_ENABLE_MODEL_SCANS=1` and `MODEL_API_KEY`. Model scans then use the configured
+per-scan and daily limits. On Vercel, the SQLite spend ledger is per instance, so those
+limits are not a global spending ceiling. The model opt-in is the only scan path that
+can make requests to the Meta API.
+
+If `TRUSTMAP_ENABLE_MODEL_SCANS=1` but `MODEL_API_KEY` is not set:
 
 ```json
 503
-{"error": "Live scans are paused on this server; try the demo"}
+{"error": "Model scans need MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1"}
 ```
 
-No job is created. Demo routes do not need the key.
+No job is created. Free code-only scans and demo routes do not need the key.
 
 ## `POST /api/scan/stream`
 
