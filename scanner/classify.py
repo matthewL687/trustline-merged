@@ -77,6 +77,9 @@ CLASSIFY_JSON_SCHEMA = {
 CLASSIFICATION_FALLBACK_REASON = (
     "Model unavailable; a file-context fallback label was used. Review this classification."
 )
+FREE_CLASSIFICATION_REASON = (
+    "Free scan mode: deterministic file-context label; no Meta API call was made."
+)
 
 
 def _classification_key(ref: Reference) -> tuple[str, str, str, str, str, str]:
@@ -106,6 +109,7 @@ def classify(
     logs: list[CallLog] | None = None,
     on_progress=None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> list[Classification]:
     chosen = refs if include_filtered else actionable(refs)
     groups: dict[tuple[str, str, str, str, str, str], list[Reference]] = {}
@@ -128,9 +132,13 @@ def classify(
     classified_groups = 0
     if workers <= 1:
         for index in range(len(batches)):
-            if deadline is not None and time.monotonic() >= deadline:
+            if not model_enabled or (deadline is not None and time.monotonic() >= deadline):
                 done[index] = [
-                    _fallback_classification(ref, str(item_index))
+                    _fallback_classification(
+                        ref,
+                        str(item_index),
+                        reason=(FREE_CLASSIFICATION_REASON if not model_enabled else None),
+                    )
                     for item_index, ref in enumerate(batches[index])
                 ]
             else:
@@ -141,31 +149,43 @@ def classify(
     else:
         # Complete independent batches as they return, while preserving source
         # order in the final report and in the progress events.
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(run, index): index for index in range(len(batches))}
-            try:
-                timeout = (
-                    max(0.0, deadline - time.monotonic())
-                    if deadline is not None
-                    else None
-                )
-                for future in as_completed(futures, timeout=timeout):
-                    index = futures[future]
-                    done[index] = future.result()
-                    classified_groups += len(batches[index])
-                    if on_progress is not None:
-                        on_progress(classified_groups, len(representatives))
-            except TimeoutError:
-                for future, index in futures.items():
-                    if done[index] is None:
-                        future.cancel()
-                        done[index] = [
-                            _fallback_classification(ref, str(item_index))
-                            for item_index, ref in enumerate(batches[index])
-                        ]
-                        classified_groups += len(batches[index])
+        if not model_enabled:
+            for index, batch in enumerate(batches):
+                done[index] = [
+                    _fallback_classification(
+                        ref, str(item_index), reason=FREE_CLASSIFICATION_REASON
+                    )
+                    for item_index, ref in enumerate(batch)
+                ]
+                classified_groups += len(batch)
                 if on_progress is not None:
                     on_progress(classified_groups, len(representatives))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(run, index): index for index in range(len(batches))}
+                try:
+                    timeout = (
+                        max(0.0, deadline - time.monotonic())
+                        if deadline is not None
+                        else None
+                    )
+                    for future in as_completed(futures, timeout=timeout):
+                        index = futures[future]
+                        done[index] = future.result()
+                        classified_groups += len(batches[index])
+                        if on_progress is not None:
+                            on_progress(classified_groups, len(representatives))
+                except TimeoutError:
+                    for future, index in futures.items():
+                        if done[index] is None:
+                            future.cancel()
+                            done[index] = [
+                                _fallback_classification(ref, str(item_index))
+                                for item_index, ref in enumerate(batches[index])
+                            ]
+                            classified_groups += len(batches[index])
+                    if on_progress is not None:
+                        on_progress(classified_groups, len(representatives))
     if logs is not None:
         for bundle in batch_logs:
             logs.extend(bundle)
@@ -272,7 +292,9 @@ def _merge(ref: Reference, item: ClassificationItem) -> Classification:
     )
 
 
-def _fallback_classification(ref: Reference, ref_id: str) -> Classification:
+def _fallback_classification(
+    ref: Reference, ref_id: str, *, reason: str | None = None
+) -> Classification:
     file = ref.file.lower().strip("/")
     parts = set(file.split("/"))
     if is_bucket_ref(ref):
@@ -298,7 +320,7 @@ def _fallback_classification(ref: Reference, ref_id: str) -> Classification:
         runs_in=runs_in,
         blast_radius=0,
         confidence=0.0,
-        reason=CLASSIFICATION_FALLBACK_REASON,
+        reason=reason or CLASSIFICATION_FALLBACK_REASON,
     )
 
 
