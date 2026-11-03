@@ -24,6 +24,7 @@ from api.limits import LimitsStore, client_ip
 from scanner.config import (
     DEFAULT_AGENT_DEADLINE_S,
     DEFAULT_RANK_DEADLINE_S,
+    SERVERLESS_CLASSIFY_DEADLINE_S,
     SCAN_COST_CAP_USD,
     SERVERLESS_AGENT_DEADLINE_S,
     SERVERLESS_RANK_DEADLINE_S,
@@ -41,6 +42,7 @@ log = logging.getLogger("trustmap")
 PUBLIC = Path(__file__).resolve().parents[1] / "public"
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 LIVE_UNCONFIGURED = "Live scans aren't configured; try the demo"
+LIVE_PAUSED = "Live scans are paused on this server; try the demo"
 PATH_REFUSED = "Paste a GitHub repository or website URL"
 HEARTBEAT_S = 15.0
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -114,6 +116,16 @@ def rank_deadline(start: float | None = None) -> float | None:
     return _deadline("TRUSTMAP_RANK_DEADLINE_S", default, start)
 
 
+def classify_deadline(start: float | None = None) -> float | None:
+    """Bound model classification on serverless hosts before falling back by file context."""
+    start = time.monotonic() if start is None else start
+    if not on_serverless():
+        return None
+    return _deadline(
+        "TRUSTMAP_CLASSIFY_DEADLINE_S", SERVERLESS_CLASSIFY_DEADLINE_S, start
+    )
+
+
 def create_app(
     *,
     model_client: ModelClient | None = None,
@@ -184,10 +196,14 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    def live_paused() -> bool:
+        enabled = os.environ.get("TRUSTMAP_ENABLE_LIVE_SCANS", "").strip().lower()
+        return on_serverless() and enabled not in {"1", "true", "yes"}
+
     def live_ready() -> bool:
         if model_client is not None:
             return True
-        return bool(os.environ.get("MODEL_API_KEY", "").strip())
+        return not live_paused() and bool(os.environ.get("MODEL_API_KEY", "").strip())
 
     def admit(body: ScanIn, request: Request) -> Job | JSONResponse:
         """Check the target and the limits, then start the scan as a background job."""
@@ -198,7 +214,8 @@ def create_app(
         if kind == "path" and not path_scan_allowed(target):
             return JSONResponse(status_code=400, content={"error": PATH_REFUSED, "kind": "path"})
         if not live_ready():
-            return JSONResponse(status_code=503, content={"error": LIVE_UNCONFIGURED})
+            message = LIVE_PAUSED if live_paused() else LIVE_UNCONFIGURED
+            return JSONResponse(status_code=503, content={"error": message})
         ip = client_ip(request, hops=limit_store.trusted_hops)
         job = Job(kind=kind, target=target)
         blocked = limit_store.admit(ip, job.scan_id, cost_cap)
@@ -246,7 +263,11 @@ def create_app(
         start = time.monotonic()
         deadlines = {
             name: value
-            for name, value in (("deadline", agent_deadline(start)), ("rank_deadline", rank_deadline(start)))
+            for name, value in (
+                ("deadline", agent_deadline(start)),
+                ("rank_deadline", rank_deadline(start)),
+                ("classify_deadline", classify_deadline(start)),
+            )
             if value is not None
         }
         try:
