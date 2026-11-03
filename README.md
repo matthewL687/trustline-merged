@@ -18,12 +18,21 @@ behind it:
 |---|---|---|
 | 01 Gather | code: file walk or page fetch, patterns, filters | `scanner/extract.py`, `scanner/website.py` |
 | 02 Classify | Muse Spark: what each reference is, where it runs, blast radius 0–3 | `scanner/classify.py` |
-| 03 Investigate | code lookups (DNS, RDAP, bucket probes, GitHub, platform fingerprints, Tranco) and the live home page of every host worth ranking; a target with a red flag gets one Muse Spark agent run (at most 6 turns) that digs into its history and leads; a clean target gets its history (crt.sh, Wayback) from code | `scanner/agent.py`, `scanner/tools/` |
+| 03 Investigate | code lookups (DNS, RDAP, bucket probes, GitHub, platform fingerprints, Tranco) and the live home page of every host worth ranking; a target with a red flag can get one Muse Spark agent run (at most 3 turns), with a scan-wide limit of 12 agent targets; a clean target gets its history (crt.sh, Wayback) from code | `scanner/agent.py`, `scanner/tools/` |
 | 04 Reason | Muse Spark writes the risk; code checks every claim against the evidence and applies severity floors. Only a code rule can put a target in Fix today | `scanner/report.py` |
 | 05 Report | code: fix today, review, checked and safe | `public/static/app.js` |
 
 Facts come from deterministic tools and are cached in SQLite. The model never looks
 anything up and never does date math.
+
+To bound slow model work, one scan starts at most 12 agent investigations, with at
+most 3 turns each. On long-lived hosts, new agent work stops 4 minutes after scan
+start and new ranking calls stop after 8 minutes; Vercel keeps its shorter 170/250
+second limits. Model requests time out after 30 seconds. Code lookups keep running
+for every selected target, and the report retains their evidence when a model step
+is skipped. Large repositories are still subject to the file and byte coverage caps
+reported by Layer 01, and external service delays mean no fixed runtime can be
+guaranteed for every repository.
 
 Scanning the same repo twice puts the same targets in Fix today. A target lands there
 only when a code rule says so (a missing bucket or account, an unregistered or dead

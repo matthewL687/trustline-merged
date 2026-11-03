@@ -22,6 +22,8 @@ from api.demo import demo_gap_ms, demo_report, load_demo
 from api.jobs import Job, JobStore
 from api.limits import LimitsStore, client_ip
 from scanner.config import (
+    DEFAULT_AGENT_DEADLINE_S,
+    DEFAULT_RANK_DEADLINE_S,
     SCAN_COST_CAP_USD,
     SERVERLESS_AGENT_DEADLINE_S,
     SERVERLESS_RANK_DEADLINE_S,
@@ -101,13 +103,15 @@ def _deadline(env: str, serverless_default: float, start: float) -> float | None
 def agent_deadline(start: float | None = None) -> float | None:
     """When the agent stage must stop starting new work, as a time.monotonic() value."""
     start = time.monotonic() if start is None else start
-    return _deadline("TRUSTMAP_AGENT_DEADLINE_S", SERVERLESS_AGENT_DEADLINE_S, start)
+    default = SERVERLESS_AGENT_DEADLINE_S if on_serverless() else DEFAULT_AGENT_DEADLINE_S
+    return _deadline("TRUSTMAP_AGENT_DEADLINE_S", default, start)
 
 
 def rank_deadline(start: float | None = None) -> float | None:
     """When rank must stop starting model calls, so the scan ends before the host cuts it off."""
     start = time.monotonic() if start is None else start
-    return _deadline("TRUSTMAP_RANK_DEADLINE_S", SERVERLESS_RANK_DEADLINE_S, start)
+    default = SERVERLESS_RANK_DEADLINE_S if on_serverless() else DEFAULT_RANK_DEADLINE_S
+    return _deadline("TRUSTMAP_RANK_DEADLINE_S", default, start)
 
 
 def create_app(

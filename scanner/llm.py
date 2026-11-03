@@ -15,6 +15,7 @@ from scanner.config import (
     CLASSIFY_MODEL,
     LLM_MAX_RETRIES,
     META_BASE_URL,
+    MODEL_REQUEST_TIMEOUT_S,
     MODEL_PRICES,
 )
 from scanner.lookups import LookupCache, default_cache
@@ -199,7 +200,10 @@ class LiveModelClient:
         self._client = OpenAI(
             base_url=META_BASE_URL,
             api_key=key,
-            http_client=DefaultHttpxClient(verify=_tls_context()),
+            timeout=MODEL_REQUEST_TIMEOUT_S,
+            http_client=DefaultHttpxClient(
+                verify=_tls_context(), timeout=MODEL_REQUEST_TIMEOUT_S
+            ),
         )
         self._steady = dict(STEADY_PARAMS)
 

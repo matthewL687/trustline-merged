@@ -82,10 +82,12 @@ because another instance cannot replay the job.
 Every event stream sends an SSE comment (`: keep-alive`) after 15 quiet seconds.
 
 `TRUSTMAP_AGENT_DEADLINE_S` sets how many seconds into a scan the agent stage stops
-starting new work (default 170 on serverless hosts, off elsewhere). Targets it skips keep
-their lookup evidence, so ranking and the severity floors still see it.
-`TRUSTMAP_RANK_DEADLINE_S` does the same for ranking (default 250 on serverless hosts):
-targets not ranked by then keep the code severity, with the risk text saying so.
+starting new work (default 170 on serverless hosts and 240 elsewhere). Targets it skips
+keep their lookup evidence, so ranking and the severity floors still see it.
+`TRUSTMAP_RANK_DEADLINE_S` does the same for ranking (default 250 on serverless hosts
+and 480 elsewhere): targets not ranked by then keep the code severity, with the risk
+text saying so. Set either to `0` to disable its deadline. Model API requests time out
+after 30 seconds.
 
 ## `GET /api/scan/{id}/events`
 

@@ -10,6 +10,7 @@ from scanner.config import (
     AGENT_REASONING_EFFORT,
     EXPIRY_INVESTIGATE_DAYS,
     MAX_AGENT_TOOL_CALLS,
+    MAX_AGENT_TARGETS,
     MAX_INVESTIGATION_CONCURRENCY,
     PRECHECK_CONCURRENCY,
     SCAN_COST_CAP_USD,
@@ -161,10 +162,14 @@ async def precheck(
                 "github_owner", {"owner": login}, ctx
             )
         return _attach_tranco(ref, evidence)
-    evidence["dns"] = await run_tool("dns", {"host": ref.host_or_bucket}, ctx)
     domain = ref.domain or ""
+    jobs = {"dns": run_tool("dns", {"host": ref.host_or_bucket}, ctx)}
     if domain:
-        evidence["rdap"] = await run_tool("rdap", {"domain": domain}, ctx)
+        jobs["rdap"] = run_tool("rdap", {"domain": domain}, ctx)
+    login = github_login(ref)
+    if login:
+        jobs["github_owner"] = run_tool("github_owner", {"owner": login}, ctx)
+    evidence.update(zip(jobs, await asyncio.gather(*jobs.values())))
     dns = evidence.get("dns") or {}
     cnames = list(dns.get("cnames") or [])
     if matching_platform(ref.host_or_bucket, cnames):
@@ -176,11 +181,6 @@ async def precheck(
                 "dns_status": dns.get("status"),
             },
             ctx,
-        )
-    login = github_login(ref)
-    if login:
-        evidence["github_owner"] = await run_tool(
-            "github_owner", {"owner": login}, ctx
         )
     return _attach_tranco(ref, consistent_evidence(evidence))
 
@@ -262,11 +262,11 @@ def _precheck_key(ref: Reference, cl: Classification) -> tuple:
     """Everything precheck() reads. Two references sharing this get one lookup."""
     is_bucket = cl.type == "bucket" or _is_bucket_ref(ref)
     return (
-        cl.type,
-        ref.host_or_bucket,
-        ref.domain or "",
-        ref.action_owner or "",
-        ref.action_repo or "",
+        "bucket" if is_bucket else "other",
+        ref.host_or_bucket.lower(),
+        (ref.domain or "").lower(),
+        (ref.action_owner or "").lower(),
+        (ref.action_repo or "").lower(),
         _bucket_provider(ref.raw) if is_bucket else "",
         is_github_action_ref(ref),
         is_github_owner_ref(ref),
@@ -362,6 +362,14 @@ async def investigate(
             clean.append((target, ranked))
     # Highest exposure first, so a spent budget skips the least important runs.
     runs.sort(key=lambda run: _priority(checked, run[0]))
+    # Bound model-led exploration for very large repos. Every target still gets
+    # code prechecks and is ranked from those facts; lower-priority targets just
+    # do not start an agent conversation.
+    deferred, runs = runs[MAX_AGENT_TARGETS:], runs[:MAX_AGENT_TARGETS]
+    for _lead_index, members in deferred:
+        for index in members:
+            ref, _cl, evidence = checked[index]
+            results[index] = _budget_skip(ref, evidence)
 
     spent = 0.0
     lock = asyncio.Lock()

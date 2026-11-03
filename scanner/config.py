@@ -92,9 +92,10 @@ LLM_MAX_RETRIES = 2
 CLASSIFY_BATCH_SIZE = 20
 # batches in flight at once; rank already runs this many model calls in parallel
 CLASSIFY_CONCURRENCY = 8
-MAX_AGENT_TOOL_CALLS = 6
+MAX_AGENT_TOOL_CALLS = 3
+MAX_AGENT_TARGETS = 12
 MAX_INVESTIGATION_CONCURRENCY = 4
-PRECHECK_CONCURRENCY = 8
+PRECHECK_CONCURRENCY = 16
 RANK_CONCURRENCY = 8
 SCAN_COST_CAP_USD = 1.00
 DAILY_CAP_USD = 10.0
@@ -119,6 +120,11 @@ MODEL_PRICES: dict[str, dict[str, float]] = {
 SERVERLESS_AGENT_DEADLINE_S = 170.0
 # ...and rank stops starting model calls here, so the last ones end before the cutoff.
 SERVERLESS_RANK_DEADLINE_S = 250.0
+# Keep scans on long-lived hosts bounded too. These deadlines are measured from
+# scan start, leaving time for report finalization inside a 10-minute target.
+DEFAULT_AGENT_DEADLINE_S = 240.0
+DEFAULT_RANK_DEADLINE_S = 480.0
+MODEL_REQUEST_TIMEOUT_S = 30.0
 
 
 def on_serverless() -> bool:

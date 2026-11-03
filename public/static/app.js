@@ -578,7 +578,7 @@
 
   function stepNote(key, pre, turns) {
     var budget = (S.done && S.done.budget_targets) || [];
-    if (budget.indexOf(key) !== -1) { return "Not investigated: the scan’s model budget ran out."; }
+    if (budget.indexOf(key) !== -1) { return "Agent skipped: the scan reached its agent budget; code lookup facts were kept."; }
     if (pre.next === "popular") { return "No agent needed: a top-ranked domain that resolves."; }
     if (pre.next === "facts") {
       // say only what code actually ran for this target
@@ -629,15 +629,16 @@
       return state === "done" ? h("p", { class: "mono", text: "Nothing to look up." }) : null;
     }
     var agent = keys.filter(function (key) {
-      return (S.pre[key] || {}).next === "agent" || (S.turns[key] || []).length;
+      var budget = (S.done && S.done.budget_targets) || [];
+      return budget.indexOf(key) === -1 && ((S.pre[key] || {}).next === "agent" || (S.turns[key] || []).length);
     }).length;
     var flagged = keys.filter(function (key) {
       return facts(evidenceFor(key)).some(function (item) { return item[0] === "alert"; });
     }).length;
     return h("div", { class: "stats" },
       stat(fmt(keys.length), plural(keys.length, "target") + " checked"),
-      stat(fmt(agent), "sent to the agent"),
-      stat(fmt(S.calls), "agent " + plural(S.calls, "call")),
+      stat(fmt(agent), "agent candidates"),
+      stat(fmt(S.calls), "agent tool " + plural(S.calls, "call")),
       stat(fmt(flagged), "with a red flag"));
   }
 
@@ -763,7 +764,7 @@
     var list = findingsSorted();
     var groups = groupsOf(list);
     var budget = (S.done && S.done.budget_targets) || [];
-    var note = budget.length ? budget.length + " lower-priority " + plural(budget.length, "target was", "targets were") + " not investigated (model budget)." : "";
+    var note = budget.length ? budget.length + " lower-priority " + plural(budget.length, "target was", "targets were") + " not sent to the agent; code checks still ran." : "";
     if (!list.length && S.gather && !S.gather.actionable) { note = "Nothing in this target could change hands."; }
     return [
       note ? h("p", { class: "verdict-src mono", text: note }) : null,
@@ -847,7 +848,7 @@
     }
     if (n === 3) {
       var checked = Object.keys(S.pre).length || Object.keys(S.ranked).length;
-      return fmt(checked) + " checked" + (S.calls ? " · " + S.calls + " agent " + plural(S.calls, "call") : "");
+      return fmt(checked) + " checked" + (S.calls ? " · " + S.calls + " agent tool " + plural(S.calls, "call") : "");
     }
     if (n === 4) { return fmt(Object.keys(S.ranked).length) + " ranked"; }
     return groupsOf(findingsSorted()).today.length + " to fix today";
@@ -907,7 +908,7 @@
       parts.push("scanning " + clock(Date.now() - S.clientStart));
     } else if (S.mode !== "demo") {
       if (S.startedTs != null && S.doneTs != null) { parts.push(secs(S.doneTs - S.startedTs)); }
-      if (S.calls) { parts.push(S.calls + " agent " + plural(S.calls, "call")); }
+      if (S.calls) { parts.push(S.calls + " agent tool " + plural(S.calls, "call")); }
       var cost = S.done && typeof S.done.cost_usd === "number" ? S.done.cost_usd : null;
       if (cost != null) { parts.push(money(cost) + " model cost"); }
     }
