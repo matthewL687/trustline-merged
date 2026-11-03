@@ -45,7 +45,7 @@ Public-safety limits (demo routes are exempt):
 - Daily model-spend cap (`TRUSTMAP_DAILY_CAP_USD`, default 10). Each accepted scan
   reserves the per-scan cap (`SCAN_COST_CAP_USD`, default 1) against the day, then
   reconciles to actual spend when the job ends.
-- Per-IP cap (`TRUSTMAP_IP_SCANS_PER_HOUR`, default 5). Client `X-Forwarded-For` is
+- Per-IP cap (`TRUSTMAP_IP_SCANS_PER_HOUR`, default 20). Client `X-Forwarded-For` is
   ignored unless `TRUSTMAP_TRUSTED_PROXY_HOPS` is set (0 locally, 1 on Render).
 - Concurrent jobs (`TRUSTMAP_MAX_CONCURRENT_SCANS`, default 3) → 429
   `"Busy, try again in a minute"`.
