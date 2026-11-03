@@ -30,7 +30,13 @@ from scanner.config import (
     SERVERLESS_RANK_DEADLINE_S,
     on_serverless,
 )
-from scanner.llm import LiveModelClient, ModelClient, failure_message, redact_secrets
+from scanner.llm import (
+    DisabledModelClient,
+    LiveModelClient,
+    ModelClient,
+    failure_message,
+    redact_secrets,
+)
 from scanner.lookups import LookupCache, default_cache
 from scanner.report import ScanOutcome, run_scan
 from scanner.ssrf import allow_local_scan
@@ -41,8 +47,7 @@ log = logging.getLogger("trustmap")
 # The page lives in public/, which Vercel serves from its CDN; elsewhere this app serves it.
 PUBLIC = Path(__file__).resolve().parents[1] / "public"
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
-LIVE_UNCONFIGURED = "Live scans aren't configured; try the demo"
-LIVE_PAUSED = "Live scans are paused on this server; try the demo"
+MODEL_UNCONFIGURED = "Model scans need MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1"
 PATH_REFUSED = "Paste a GitHub repository or website URL"
 HEARTBEAT_S = 15.0
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -196,14 +201,14 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    def live_paused() -> bool:
-        enabled = os.environ.get("TRUSTMAP_ENABLE_LIVE_SCANS", "").strip().lower()
-        return on_serverless() and enabled not in {"1", "true", "yes"}
+    def model_scans_enabled() -> bool:
+        enabled = os.environ.get("TRUSTMAP_ENABLE_MODEL_SCANS", "").strip().lower()
+        return model_client is not None or enabled in {"1", "true", "yes"}
 
     def live_ready() -> bool:
-        if model_client is not None:
-            return True
-        return not live_paused() and bool(os.environ.get("MODEL_API_KEY", "").strip())
+        return model_client is not None or not model_scans_enabled() or bool(
+            os.environ.get("MODEL_API_KEY", "").strip()
+        )
 
     def admit(body: ScanIn, request: Request) -> Job | JSONResponse:
         """Check the target and the limits, then start the scan as a background job."""
@@ -214,11 +219,11 @@ def create_app(
         if kind == "path" and not path_scan_allowed(target):
             return JSONResponse(status_code=400, content={"error": PATH_REFUSED, "kind": "path"})
         if not live_ready():
-            message = LIVE_PAUSED if live_paused() else LIVE_UNCONFIGURED
-            return JSONResponse(status_code=503, content={"error": message})
+            return JSONResponse(status_code=503, content={"error": MODEL_UNCONFIGURED})
+        use_model = model_scans_enabled()
         ip = client_ip(request, hops=limit_store.trusted_hops)
         job = Job(kind=kind, target=target)
-        blocked = limit_store.admit(ip, job.scan_id, cost_cap)
+        blocked = limit_store.admit(ip, job.scan_id, cost_cap if use_model else 0.0)
         if blocked:
             return JSONResponse(status_code=429, content={"error": blocked})
         store.add(job)
@@ -227,7 +232,8 @@ def create_app(
                 "type": "started",
                 "kind": kind,
                 "target": target,
-                "cost_cap_usd": cost_cap,
+                "cost_cap_usd": cost_cap if use_model else 0.0,
+                "model_calls_enabled": use_model,
                 # on a serverless host the next request can land on another
                 # instance, which has never heard of this job
                 "shareable": not on_serverless(),
@@ -261,6 +267,7 @@ def create_app(
 
         actual = 0.0
         start = time.monotonic()
+        use_model = model_scans_enabled()
         deadlines = {
             name: value
             for name, value in (
@@ -274,11 +281,12 @@ def create_app(
             lookup = cache or lookup_default
             outcome = await scan_runner(
                 job.target,
-                client=client(),
+                client=client() if use_model else DisabledModelClient(),
                 cache=lookup,
                 ctx=ctx or ToolContext(cache=lookup),
                 hydrate_only=False,
-                cost_cap=cost_cap,
+                cost_cap=cost_cap if use_model else 0.0,
+                model_enabled=use_model,
                 on_event=on_event,
                 **deadlines,
             )
