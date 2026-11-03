@@ -15,7 +15,7 @@ from scanner.config import (
     PRECHECK_CONCURRENCY,
     SCAN_COST_CAP_USD,
 )
-from scanner.llm import CallLog, ModelClient, ToolTurn, cost_usd
+from scanner.llm import CallLog, ModelClient, ToolTurn, cost_usd, is_model_transport_error
 from scanner.llm import _tokens
 from scanner.lookups import consistent_evidence, merge_evidence
 from scanner.models import (
