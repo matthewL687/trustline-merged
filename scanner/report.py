@@ -865,6 +865,7 @@ def rank(
     logs: list[CallLog] | None = None,
     on_event: OnEvent | None = None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> list[Finding]:
     groups = group_by_target(rows)
     if not groups:
@@ -881,6 +882,7 @@ def rank(
             cache=cache,
             logs=group_logs[index],
             deadline=deadline,
+            model_enabled=model_enabled,
         )
         results[index] = finding
         if finding.needs_review and finding.risk == RANK_TIME_NOTE:
@@ -914,11 +916,31 @@ def _rank_group(
     cache: LookupCache | None,
     logs: list[CallLog] | None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> Finding:
     payload = finding_payload(group)
     floor, floor_why = floor_decision(group)
     ref0 = group["rows"][0][0]
     investigations = [row[2] for row in group["rows"]]
+    if not model_enabled:
+        parsed = RankModelOut(
+            severity="info",
+            risk="Free scan mode: no Meta model analysis was run. Severity uses code rules only.",
+            fix="remove dead reference",
+            uncertain_about="Model based classification and ranking are disabled.",
+            blast_radius=payload["classified_blast_radius"],
+            blast_override_reason="",
+        )
+        return _finding_from_rank(
+            group=group,
+            payload=payload,
+            parsed=parsed,
+            floor=floor,
+            floor_why=floor_why,
+            cost_total=0.0,
+            needs_review=True,
+            code_only=True,
+        )
     if floor is None and all(item.summary == FACTS_NOTE for item in investigations):
         parsed = RankModelOut(
             severity="info",
@@ -1054,6 +1076,7 @@ def _finding_from_rank(
     cost_total: float,
     needs_review: bool = False,
     risk: str = "",
+    code_only: bool = False,
 ) -> Finding:
     evidence = group["evidence"]
     refs = [item["file_line"] for item in payload["references"]]
@@ -1078,7 +1101,12 @@ def _finding_from_rank(
         model_fix = parsed.fix
         uncertain = parsed.uncertain_about
     uncertain = _github_owner_note(uncertain, evidence)
-    final, raised, ceiling_note = settle_severity(model_severity, floor)
+    if code_only:
+        final = floor or "info"
+        raised = floor or ""
+        ceiling_note = "Code rules only; no model ranking was used."
+    else:
+        final, raised, ceiling_note = settle_severity(model_severity, floor)
     # The rule that decided or bounded the severity, shown whether or not it
     # had to raise the model's call.
     floor_reason = floor_why if floor else ""
@@ -1148,6 +1176,7 @@ async def run_scan(
     cost_cap: float = SCAN_COST_CAP_USD,
     on_event: OnEvent | None = None,
     classify_deadline: float | None = None,
+    model_enabled: bool = True,
     deadline: float | None = None,
     rank_deadline: float | None = None,
 ) -> ScanOutcome:
@@ -1197,6 +1226,7 @@ async def run_scan(
             logs=class_logs,
             on_progress=classify_progress,
             deadline=classify_deadline,
+            model_enabled=model_enabled,
         )
     )
     classified = [
@@ -1236,6 +1266,7 @@ async def run_scan(
             cost_cap=cost_cap,
             on_event=on_event,
             deadline=deadline,
+            model_enabled=model_enabled,
         )
         inv_by_loc = {(item.file, item.line): item for item in investigations}
         rows = [
@@ -1252,6 +1283,7 @@ async def run_scan(
         logs=rank_logs,
         on_event=on_event,
         deadline=rank_deadline,
+        model_enabled=model_enabled,
     )
     budget = sorted(
         {
