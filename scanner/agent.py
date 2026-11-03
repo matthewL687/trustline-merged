@@ -68,6 +68,7 @@ EXECUTING = frozenset({"browser", "server", "build", "deploy", "ci"})
 BUDGET_NOTE = "not investigated (budget)"
 TIME_NOTE = "agent skipped (time budget)"
 FACTS_NOTE = "code lookups only: no red flag for the agent"
+FREE_MODE_NOTE = "free scan mode: deterministic checks only; Meta API was not called"
 AGENT_FINDINGS = "agent_findings"
 
 # What a target's references add up to, strongest first. A target is ranked
@@ -298,6 +299,7 @@ async def investigate(
     max_concurrent: int = MAX_INVESTIGATION_CONCURRENCY,
     on_event: OnEvent | None = None,
     deadline: float | None = None,
+    model_enabled: bool = True,
 ) -> list[Investigation]:
     """deadline is a time.monotonic() value; after it no new agent run starts and
     running ones stop between turns. The precheck facts are kept either way.
@@ -357,7 +359,19 @@ async def investigate(
     for target, members in by_target.items():
         ranked = [index for index in members if steps[index] in {"agent", "facts"}]
         if target_step[target] == "agent":
-            runs.append((_lead(checked, steps, members), ranked))
+            if model_enabled:
+                runs.append((_lead(checked, steps, members), ranked))
+            else:
+                for index in members:
+                    ref, _cl, evidence = checked[index]
+                    results[index] = Investigation(
+                        file=ref.file,
+                        line=ref.line,
+                        host_or_bucket=ref.host_or_bucket,
+                        status="done",
+                        summary=FREE_MODE_NOTE,
+                        evidence=evidence,
+                    )
         elif target_step[target] == "facts":
             clean.append((target, ranked))
     # Highest exposure first, so a spent budget skips the least important runs.
