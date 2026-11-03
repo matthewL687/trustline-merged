@@ -248,6 +248,10 @@
         S.finished = true;
         mark();
         break;
+      case "notice":
+        if (ev.message) { S.notices.push(String(ev.message)); }
+        mark();
+        break;
       case "error":
         S.failed = String(ev.message || "The scan failed.");
         [1, 2, 3, 4, 5].forEach(function (n) {
