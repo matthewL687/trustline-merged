@@ -45,7 +45,7 @@ from scanner.extract import (
 )
 from scanner.tranco import tranco_rank
 from scanner.website import extract_website
-from scanner.llm import CallLog, ModelClient, call_json
+from scanner.llm import CallLog, ModelClient, call_json, is_model_transport_error
 from scanner.lookups import LookupCache, consistent_evidence, merge_evidence
 from scanner.models import (
     Classification,
