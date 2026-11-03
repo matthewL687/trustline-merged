@@ -617,7 +617,20 @@ async def investigate_one(
         if trace and _past(deadline):
             summary = summary or TIME_NOTE
             break
-        turn, log = await asyncio.to_thread(_model_turn, client, messages, tools)
+        try:
+            turn, log = await asyncio.to_thread(_model_turn, client, messages, tools)
+        except Exception as exc:
+            if not is_model_transport_error(exc):
+                raise
+            summary = "Model request timed out; continuing with code lookup evidence only."
+            emit(
+                on_event,
+                {
+                    "type": "notice",
+                    "message": "The model timed out during investigation. Trustline kept its code lookup results and continued.",
+                },
+            )
+            break
         cost_total += log.cost_usd
         trace.append(
             TraceEvent(
