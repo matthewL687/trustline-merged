@@ -183,6 +183,9 @@
         S.kind = ev.kind || S.kind;
         S.target = ev.target || S.target;
         S.recordedWith = ev.recorded_with || S.recordedWith;
+        if (ev.model_calls_enabled === false) {
+          S.notices.push("Free scan mode: no Meta API calls will be made.");
+        }
         S.startedTs = ts;
         begin(1, ts);
         mark(1);
@@ -1201,8 +1204,7 @@
     setBusy(false);
     history.replaceState(null, "", window.location.pathname);
     var retry = { label: "Retry", run: function () { startScan(raw); } };
-    if (status === 503 && detail.indexOf("paused") >= 0) { showDialog("Live scans are paused on this server.", "The recorded demo is available. The server will only use its model key when live scans are explicitly enabled.", DEMO_ACTION); }
-    else if (status === 503) { showDialog("Live scans aren’t configured on this server.", "Add MODEL_API_KEY to the server’s environment, or watch the recorded demo.", DEMO_ACTION); }
+    if (status === 503) { showDialog("Model scans aren’t configured on this server.", "Repository scans can run in free code-only mode. Model analysis requires MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1.", DEMO_ACTION); }
     else if (status === 429) { showDialog("Trustline is busy.", detail || "Too many scans right now.", DEMO_ACTION); }
     else if (status === 400) { showDialog("This target can’t be scanned.", detail); }
     else if (status === 0) { showDialog("Could not reach the Trustline server.", "Check that it is running, then try again.", retry); }
