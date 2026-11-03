@@ -48,6 +48,7 @@ log = logging.getLogger("trustmap")
 PUBLIC = Path(__file__).resolve().parents[1] / "public"
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 MODEL_UNCONFIGURED = "Model scans need MODEL_API_KEY and TRUSTMAP_ENABLE_MODEL_SCANS=1"
+LIVE_UNCONFIGURED = MODEL_UNCONFIGURED
 PATH_REFUSED = "Paste a GitHub repository or website URL"
 HEARTBEAT_S = 15.0
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
