@@ -145,6 +145,16 @@ class FakeModelClient:
         )
 
 
+class DisabledModelClient:
+    """Sentinel used by free scans; every model stage must skip this client."""
+
+    def complete_json(self, **_kwargs: Any) -> RawCompletion:
+        raise RuntimeError("Meta API calls are disabled for this scan")
+
+    def complete_turn(self, **_kwargs: Any) -> ToolTurn:
+        raise RuntimeError("Meta API calls are disabled for this scan")
+
+
 def _tls_context() -> ssl.SSLContext:
     """The host's CA certificates plus certifi's bundle.
 
