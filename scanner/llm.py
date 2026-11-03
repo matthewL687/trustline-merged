@@ -189,6 +189,17 @@ def failure_message(exc: BaseException) -> str:
     return text if len(text) <= FAILURE_LIMIT else text[:FAILURE_LIMIT] + "..."
 
 
+def is_model_transport_error(exc: BaseException) -> bool:
+    """Whether a model request failed before returning a usable response."""
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        from openai import APIConnectionError
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, APIConnectionError)
+
+
 class LiveModelClient:
     def __init__(self, api_key: str | None = None):
         from openai import DefaultHttpxClient, OpenAI
