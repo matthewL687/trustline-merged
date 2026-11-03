@@ -20,7 +20,7 @@ def test_allowlist_is_generic_platform_roots():
 
 def test_public_safety_limit_defaults():
     assert DAILY_CAP_USD == 10.0
-    assert IP_SCANS_PER_HOUR == 5
+    assert IP_SCANS_PER_HOUR == 20
     assert MAX_CONCURRENT_SCANS == 3
     assert TRUSTED_PROXY_HOPS == 0
 
