@@ -985,7 +985,20 @@ def _rank_group(
                 floor_why=floor_why,
                 cost_total=cost_total,
             )
-        except ValueError as exc:
+        except Exception as exc:
+            if is_model_transport_error(exc):
+                return _finding_from_rank(
+                    group=group,
+                    payload=payload,
+                    parsed=None,
+                    floor=floor,
+                    floor_why=floor_why,
+                    cost_total=cost_total,
+                    needs_review=True,
+                    risk=RANK_TIME_NOTE,
+                )
+            if not isinstance(exc, ValueError):
+                raise
             rejected = str(exc)
             user = (
                 "Rank this target. Cite only facts from the provided evidence and finding.\n"
